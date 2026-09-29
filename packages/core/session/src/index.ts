@@ -22,6 +22,7 @@ import { foldRequestHeader } from './request-header.ts'
 import { ToolHistoryProjection } from './tool-history.ts'
 import type { ToolHistory } from '@deepseek-ai/dsh-llm'
 
+import { KNOWN_SESSION_EVENT_TYPES } from './known-event-types.ts'
 import { buildForkSeed } from './fork.ts'
 
 export { buildForkSeed } from './fork.ts'
@@ -747,6 +748,14 @@ export class Session {
       time: Date.now(),
       data: dataSnapshot,
       ...(surfaceMetadataSnapshot as { surfaceOp?: unknown; sourceEventSeqs?: unknown }),
+      // Out-of-repo plugins persist their own events in the log (for example delivery/change).
+      // Those types are outside the repository-generated KNOWN_SESSION_EVENT_TYPES, and the
+      // persistence read path refuses a log whose unknown events are not marked `ignorable`
+      // (see .agents/notes/implemented/architecture/2026-08-30-retain-ignorable-external-session-events.md),
+      // yet append has no way to set that marker. Mark what this build does not know as
+      // ignorable; known types keep their required-on-read semantics.
+      // fork-patch: unknown-event-ignorable
+      ...(KNOWN_SESSION_EVENT_TYPES.has(type) ? {} : { ignorable: true as const }),
     } as unknown as SessionEvent<T>)
     validateSessionEventData(event, `session event "${type}" at seq ${event.seq}`)
     this.surfaceManager.validateNext(event as SessionEvent)

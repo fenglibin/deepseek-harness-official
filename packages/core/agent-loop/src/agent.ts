@@ -24,7 +24,7 @@ import {
   errorChain,
   markAgentLoopRequest,
 } from '@deepseek-ai/dsh-llm'
-import { assertNever, deepFreeze } from '@deepseek-ai/dsh-util-values'
+import { assertNever, deepFreeze, type JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import type { EpochHeader, RequestContext, Session, SessionId, SessionSeq, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
@@ -92,6 +92,26 @@ function abortedCancelCause(signal: AbortSignal): AgentCancelCause | undefined {
     default:
       return assertNever(cause)
   }
+}
+
+/**
+ * Append one event type this build does not declare in `SessionEventMap`.
+ *
+ * `agent/cancelled` is fork vocabulary: the fork's `@deepseek-ai/dsh-agent`
+ * declares it, this build does not, so `Session.append`'s `keyof
+ * SessionEventMap` constraint resolves the whole call to `never`. The append
+ * path already accepts undeclared types — it marks them `ignorable` so a build
+ * without the producers can still read the log — so only the compile-time
+ * vocabulary needs widening, and this cast is the single place that widening is
+ * stated.
+ * @param session - the log to append to.
+ * @param type - undeclared event type name.
+ * @param data - JSON-safe payload the event type documents.
+ */
+function appendUndeclaredEvent(session: Session, type: string, data: JsonValue): void {
+  // The cast is type-only, so this stays a call on the session: storing the
+  // method in a variable first would run `append` with `this === undefined`.
+  (session.append as (type: string, data: JsonValue) => void)(type, data)
 }
 
 /** Drives one session through turn and step boundaries. */
@@ -176,6 +196,25 @@ export class ReactLoopAgent implements Agent {
     if (!options.keepInbox) {
       this.inbox.clear()
       if (this.phase.kind !== 'idle') this.phase.wakeRequested = false
+    }
+    // A cancellation request that finds no live turn leaves no trace in the log: `turn/end` is
+    // written only by a turn that actually ran, so a stop pressed while idle — after a restart,
+    // or between turns — is indistinguishable from "nothing happened". Consumers that must close
+    // work *because* the user stopped (a queue that may not resume on its own, an editor that must
+    // render the stop, a resumed process recovering why pending work vanished) have no durable
+    // fact to read, and process-local state cannot survive a restart. Record the request when no
+    // turn will record it itself; a running turn already logs `turn/end` with its aborted reason.
+    // `status` folds a maintenance phase into `idle`, and a maintenance job owns no turn either, so
+    // the same gap applies to cancelling one. `disposed` is left out: the session is being released
+    // and nothing resumes it.
+    // fork-patch: idle-cancel-event
+    if (this.status === 'idle' && cause.kind !== 'disposed') {
+      // Copy only the fields `turn/end` records: the live reason object may carry a `stack` that
+      // the log cannot hold (see `abortedCancelCause` above).
+      const recorded = cause.kind === 'hook'
+        ? { kind: 'hook' as const, reason: cause.reason }
+        : { kind: cause.kind }
+      appendUndeclaredEvent(this.session, 'agent/cancelled', { cause: recorded })
     }
     if (this.phase.kind !== 'idle') this.phase.abort.abort(cause)
   }

@@ -144,13 +144,15 @@ describe('Agent.cancel()', () => {
     expect(endings).toEqual([{ kind: 'aborted', reason: { kind: 'user' } }, { kind: 'completed' }])
   })
 
-  it('cancel() on an idle agent with nothing queued is a no-op; the next prompt runs (F2 leak guard)', async () => {
+  it('cancel() on an idle agent with nothing queued arms no marker; the next prompt runs (F2 leak guard)', async () => {
     const adapter = new MockAdapter([textResponse('reply')])
     const ctx = await harness(adapter)
     const agent = await ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
 
     // The loop is parked at the idle wait with nothing queued. A cancel here must
     // NOT arm the marker — otherwise the next legitimate prompt would be dropped.
+    // It does record the request as `agent/cancelled` (see "with no live turn"); the
+    // marker is what this guard pins, because a marker would drop the prompt.
     agent.cancel({ kind: 'user' })
 
     send(agent, 'real prompt')
@@ -1148,5 +1150,136 @@ describe('Agent.cancel()', () => {
     expect(turnEnd?.type === 'turn/end' && turnEnd.data.reason)
       .toEqual({ kind: 'aborted', reason: { kind: 'user' } })
     await ctx.fiber.dispose()
+  })
+})
+
+/**
+ * The fork-patch `idle-cancel-event` producer: a cancellation with no live turn
+ * must still be a durable, replayable log fact, because `turn/end` is written
+ * only by a turn that ran.
+ */
+describe('Agent.cancel() with no live turn', () => {
+  /** One recorded cancellation payload. */
+  interface RecordedCancel {
+    readonly cause: { readonly kind: string; readonly reason?: string }
+  }
+
+  /**
+   * Read the recorded cancellations.
+   *
+   * This build's `SessionEventMap` does not declare `agent/cancelled` — the fork
+   * owns that vocabulary — so the event name and payload are read through the
+   * runtime log view the session exposes, not through a declared narrowing.
+   */
+  function recordedCancels(agent: Agent): RecordedCancel[] {
+    const recorded: RecordedCancel[] = []
+    for (const event of agent.session.snapshotEvents()) {
+      if ((event.type as string) !== 'agent/cancelled') continue
+      const payload = event.data as { cause?: RecordedCancel['cause'] }
+      if (payload.cause !== undefined) recorded.push({ cause: payload.cause })
+    }
+    return recorded
+  }
+
+  it('records a cancellation that found no live turn, copying only the fields turn/end records', async () => {
+    const ctx = await harness(new MockAdapter([]))
+    try {
+      const agent = await ctx.agentLoop.create(SessionId('idle-cancel-recorded'), {
+        provider: 'mock', model: 'mock',
+      })
+
+      // A cause a transport mutates after the fact: only the declared fields may
+      // reach the log, so the record still describes the request that was made.
+      const cause: AgentCancelCause = { kind: 'hook', reason: 'policy stopped it' }
+      agent.cancel(cause)
+      Object.defineProperty(cause, 'stack', {
+        value: 'Error\n    at node:internal/deps/undici/undici',
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      })
+
+      // The record is an addition, not a substitute for the no-op the gap used
+      // to be: nothing was armed, so the cancellation alone opens no turn.
+      const afterCancel = agent.session.snapshotEvents().map(event => event.type as string)
+      expect(afterCancel).toContain('agent/cancelled')
+      expect(afterCancel).not.toContain('turn/start')
+
+      // Ordered before any later prompt: the stop is a fact of this log position,
+      // so a replay reads it as the user's last decision rather than as a late edit.
+      send(agent, 'spoken after the stop')
+      await agent.whenIdle()
+
+      expect(recordedCancels(agent)).toEqual([{ cause: { kind: 'hook', reason: 'policy stopped it' } }])
+      const types = agent.session.snapshotEvents().map(event => event.type as string)
+      expect(types.indexOf('agent/cancelled')).toBeLessThan(types.indexOf('user/message'))
+      expect(types).toContain('turn/start')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('records a cancellation during maintenance, which no turn can record either', async () => {
+    const ctx = await harness(new MockAdapter([]))
+    try {
+      const agent = await ctx.agentLoop.create(SessionId('maintenance-cancel-recorded'), {
+        provider: 'mock', model: 'mock',
+      })
+      const started = Promise.withResolvers<undefined>()
+      const job = agent.runMaintenance(async (signal) => {
+        started.resolve(undefined)
+        await new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => { resolve() }, { once: true })
+        })
+      })
+      await started.promise
+      expect(agent.status).toBe('idle')
+
+      agent.cancel({ kind: 'parent' })
+      await job
+
+      expect(recordedCancels(agent)).toEqual([{ cause: { kind: 'parent' } }])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('records nothing for a running turn, whose own turn/end carries the cancellation', async () => {
+    const ctx = await harness(new MockAdapter(['hang']))
+    try {
+      const agent = await ctx.agentLoop.create(SessionId('running-cancel-not-duplicated'), {
+        provider: 'mock', model: 'mock',
+      })
+
+      send(agent, 'go')
+      await expect.poll(() => agent.status).toBe('running')
+      agent.cancel({ kind: 'user' })
+      await waitForIdle(ctx, agent)
+
+      // Both records would describe one request, and consumers take the latest of
+      // either carrier: the running turn's own ending is the only one written.
+      expect(recordedCancels(agent)).toEqual([])
+      expect(agent.session.snapshotEvents().findLast(event => event.type === 'turn/end')?.data.reason)
+        .toEqual({ kind: 'aborted', reason: { kind: 'user' } })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('records nothing for disposal, which releases the session nothing resumes', async () => {
+    const ctx = await harness(new MockAdapter([]))
+    try {
+      const handle = await ctx.agents.create({
+        sessionId: SessionId('disposed-cancel-not-recorded'),
+        agentOptions: { provider: 'mock', model: 'mock' },
+      })
+
+      await handle.dispose()
+
+      expect(handle.agent.status).toBe('idle')
+      expect(recordedCancels(handle.agent)).toEqual([])
+    } finally {
+      await ctx.fiber.dispose()
+    }
   })
 })

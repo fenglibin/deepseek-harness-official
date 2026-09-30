@@ -46,3 +46,9 @@ worktrees/
 .agents/worktrees/
 .typert-*/
 native/system/test/bin/
+# added after 20260930
+apps/desktop/tests/cache-test-*/
+packages/typert/generator/tests/.generated-*/
+packages/typert/generator/tests/.rendered-*/
+scripts/staged-lint-probe-*
+examples

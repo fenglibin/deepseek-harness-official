@@ -7,19 +7,23 @@
  * its hover buttons are the `sidebar.workspaces.session.menu.item` and
  * `sidebar.workspaces.session.row.action` lists, rendered through the
  * browser's `renderSlot` with the menu's open state as the occurrence's hook
- * context; this package's own actions are entries like any plugin's. The
- * session and workspace hover cards are suppressed while a menu is open.
+ * context; this package's own actions are entries like any plugin's. A
+ * Workspace row's "..." menu is the `sidebar.workspaces.workspace.menu.item`
+ * list, rendered the same way; its shipped rows raise the requests the browser
+ * answers with its own dialogs. The session and workspace hover cards are
+ * suppressed while a menu is open.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import clsx from 'clsx'
 import type { PropsRenderSlots } from '@deepseek-ai/dsh-client-ui-slots'
 import {
-  HoverCard, IconArchiveOutlineRegular, IconEditOutlineRegular,
-  IconEllipsisOutlineRegular, IconFolderCloseRegular, IconFolderOpenRegular,
-  IconNewChatOutlineRegular, IconPinFillRegular, IconTrashOutlineRegular,
-  IconTriangleRightFillRegular, IconUnarchiveOutlineRegular, Menu, relativeTime, StateDot, Tooltip,
+  HoverCard, IconArchiveOutlineRegular, IconEllipsisOutlineRegular,
+  IconFolderCloseRegular, IconFolderOpenRegular, IconNewChatOutlineRegular,
+  IconPinFillRegular, IconTriangleRightFillRegular, IconUnarchiveOutlineRegular,
+  Menu, relativeTime, StateDot, Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import type { ShortcutCatalogEntry } from '@deepseek-ai/dsh-client-shortcuts/client'
 import type { StateDotState } from '@deepseek-ai/dsh-client-ui-primitives'
 import { abbreviateHomePath } from '@deepseek-ai/dsh-util-workspace-path'
@@ -38,6 +42,7 @@ type RowTranslate = WorkspaceBrowserProps['t']
  * card is open.
  */
 type RowRenderSlots = PropsRenderSlots<
+  | 'sidebar.workspaces.workspace.menu.item'
   | 'sidebar.workspaces.session.menu.item'
   | 'sidebar.workspaces.session.row.action'
   | 'sidebar.session.row.leading'
@@ -216,29 +221,34 @@ function rowHalf(e: { clientY: number; currentTarget: HTMLElement }): 'before' |
  * @param props.t - the browser root's locale seat.
  * @returns the row element.
  */
-export function ProjectRowItem({ group, containsCurrentDescendant = false, onToggle, onCreate, actions, drag, home, newShortcut, t }: {
+export function ProjectRowItem({
+  group, containsCurrentDescendant = false, onToggle, onCreate, actions, drag, home, newShortcut, t, renderSlot,
+}: {
   group: GroupNode
   newShortcut?: ShortcutCatalogEntry | undefined
   containsCurrentDescendant?: boolean
   onToggle: () => void
   onCreate: () => void
-  /** Real-Workspace actions; absent for the ungrouped bucket (no menu shown). */
-  actions?: { rename: () => void; delete: () => void } | undefined
+  /**
+   * Real-Workspace actions; absent for the ungrouped bucket (no menu shown).
+   * The Workspace id rides here so the menu's owner share names a real
+   * Workspace wherever the menu renders.
+   */
+  actions?: { workspaceId: WorkspaceId; rename: () => void; delete: () => void } | undefined
   /** Present only for real Workspace rows in the grouped view. */
   drag?: WorkspaceRowDragProps | undefined
   /** Host account home; POSIX home-rooted hover paths display as `~`. */
   home?: string | undefined
   t: RowTranslate
+  renderSlot: RowRenderSlots
 }) {
   const row = group
   // The ungrouped bucket has no workspace title: its label is dictionary copy.
   const label = row.workspaceId === undefined ? t('group.ungrouped') : row.label
   const active = containsCurrentDescendant || (group.expanded && group.containsCurrent)
   const [menuOpen, setMenuOpen] = useState(false)
-  const workspaceMenuItems = [
-    { id: 'rename', label: t('rename'), icon: <IconEditOutlineRegular /> },
-    { id: 'delete', label: t('delete.workspace'), icon: <IconTrashOutlineRegular />, danger: true },
-  ]
+  // The menu's open state, bound into the row entries' `useMenuOpenState` hook.
+  const menuOpenState = useMemo((): MenuOpenState => [menuOpen, setMenuOpen], [menuOpen])
   const ownRow = (
     <div
       className={clsx(css.projectRow, menuOpen && css.menuOpen)}
@@ -270,16 +280,6 @@ export function ProjectRowItem({ group, containsCurrentDescendant = false, onTog
           <Menu
             open={menuOpen}
             onClose={() => { setMenuOpen(false) }}
-            items={workspaceMenuItems}
-            onSelect={(id) => {
-              setMenuOpen(false)
-              // Unknown ids leave before the dispatch: a future menu row must
-              // not inherit the destructive branch as an else fallback.
-              /* v8 ignore next -- Menu can emit only the rename and delete rows supplied above. */
-              if (id !== 'rename' && id !== 'delete') return
-              if (id === 'rename') actions.rename()
-              else actions.delete()
-            }}
             portal
             closeOnPointerLeave
             anchor={(
@@ -292,7 +292,15 @@ export function ProjectRowItem({ group, containsCurrentDescendant = false, onTog
                 <IconEllipsisOutlineRegular />
               </button>
             )}
-          />
+          >
+            {renderSlot('sidebar.workspaces.workspace.menu.item', {
+              workspaceId: actions.workspaceId,
+              displayTitle: row.label,
+              path: row.cwd,
+              requestRename: actions.rename,
+              requestDelete: actions.delete,
+            }, { hookContext: menuOpenState })}
+          </Menu>
         )}
         <Tooltip label={t('actions.newSession')} shortcutKeys={newShortcut?.keys} side="bottom" align="end" delayMs={500}>
           <button

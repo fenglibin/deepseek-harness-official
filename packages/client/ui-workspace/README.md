@@ -11,7 +11,7 @@ Desktop product events use the optional [product analytics service](../product-a
 
 ## Summary
 
-This package lets users browse grouped or flat Session lists, choose a Workspace for a new Session, and manage Workspaces and Sessions through add, rename, reorder, search, fork, archive, and Workspace deletion; the Session row menu and its hover buttons are slot lists that client plugins extend. Pending interactions appear as warning dots, and subagent-origin Sessions remain hidden. An idle, unarchived Session row with active scheduled tasks shows a clock mark, and its hover card lists those tasks. Canonically distinct folder paths remain separate Workspaces. Adding a Workspace requires a composed directory picker; without one, adding is unavailable.
+This package lets users browse grouped or flat Session lists, choose a Workspace for a new Session, and manage Workspaces and Sessions through add, rename, reorder, search, fork, archive, and Workspace deletion; Session and Workspace row menus and hover buttons are plugin-extensible slot lists. Pending interactions appear as warning dots, and subagent-origin Sessions remain hidden. An idle, unarchived Session row with active scheduled tasks shows a clock mark, and its hover card lists those tasks. Canonically distinct folder paths remain separate Workspaces. Adding a Workspace requires a composed directory picker; without one, adding is unavailable.
 
 ## Table of Contents
 
@@ -167,6 +167,10 @@ export function apply(ctx: Context): void {
 #### Dynamic client package
 
 A dynamically loaded browser half follows the same component contract; which modules it can reach depends on its lane. A Module Loader package (`factory(require)`, as in the real Loader/Web fixture) gets `@deepseek-ai/dsh-client-ui-primitives` as an implicit baseline external: resolve `MenuItemButton` through the loader's `require`, do not list the primitive as a runtime dependency or bundle another copy, and declare a development dependency only when source compilation needs its types. A `cordis-client-runner` closure (the audience of the generated Client Slot catalog) cannot import anything: it renders its own `role="menuitem"` `<button>` with `React.createElement`, styles it through `styles.insert`, and dismisses the menu through the same `useMenuOpenState` hook, as the catalog's example shows.
+
+### Workspace row menu
+
+A Workspace row's "..." menu is the `sidebar.workspaces.workspace.menu.item` list, declared by the WorkspaceBrowser entry beside the two Session row lists. This package registers `rename` (100) and `delete` (200) into it the way a plugin registers its own row, so a plugin row takes whatever position its `order` gives it; the menu renders only for a real Workspace row, and the ungrouped bucket has none. An entry receives the row's `workspaceId`, `displayTitle`, and `path`, and dismisses the menu through the same `useMenuOpenState` hook a Session row entry uses. A Session action owns its whole interaction, up to the `shell.overlay` dialog it raises; the two shipped Workspace rows instead act through the owner callbacks `requestRename` and `requestDelete`, because the rename and delete dialogs are the browser's own local state. An entry that brings its own action ignores both callbacks.
 
 ### View state
 

@@ -12,11 +12,15 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
 import { en as commonEn } from '@deepseek-ai/dsh-client-locale/src/locales/en.ts'
-import type { DirectoryFlowOwnerProps, WorkspaceBrowserProps } from '../src/client/contract/slots.ts'
+import type {
+  DirectoryFlowOwnerProps, MenuOpenState, WorkspaceBrowserProps, WorkspaceRowOwnerProps,
+} from '../src/client/contract/slots.ts'
 import { createWorkspaceShortcutControls } from '../src/client/shortcuts.ts'
 import { createWorkspaceViewStore, FLAT_SESSION_ORDER_KEY } from '../src/client/stores.ts'
 import { UNGROUPED_KEY } from '../src/client/tree.ts'
 import { WorkspaceBrowser } from '../src/client/rows/WorkspaceBrowser.tsx'
+import { DeleteWorkspaceMenuItem } from '../src/client/workspace-actions/DeleteWorkspace.tsx'
+import { RenameWorkspaceMenuItem } from '../src/client/workspace-actions/RenameWorkspace.tsx'
 import { en, zh } from '../src/client/locales.ts'
 
 // Every fixture carries the resource hook the resources plugin merges into GlobalStandardProps.
@@ -95,13 +99,51 @@ function dragData(): Pick<DataTransfer, 'effectAllowed' | 'dropEffect' | 'setDat
   return { effectAllowed: 'uninitialized', dropEffect: 'none', setData: vi.fn() }
 }
 
-// The default child stub: an open directory flow shows its marker; the two
-// Session row lists stay empty (their entries have their own spec). A stub
-// satisfies the generic render signature only with an erased owner type.
-const renderDirectoryFlowOnly: WorkspaceBrowserProps['renderSlot'] = (name: string, owner: object) =>
-  name === 'sidebar.workspaces.directoryFlow' && (owner as DirectoryFlowOwnerProps).open
-    ? <div data-testid="directory-flow" />
-    : null
+/** The standard seat a Workspace row menu entry receives. */
+const rowStandard: GlobalStandardProps = {
+  useSessions: hook(sessionState([])),
+  useSessionStatus: hook(noPendingInteraction),
+  useSessionRetainInfo: () => undefined,
+  usePanelInfo, useResource,
+  useWorkspaces: hook(workspaceState([])),
+}
+
+/**
+ * The hookContext a contextual render occurrence carries. A stub sees the
+ * generic dispatch signature, which erases the per-key options bag, so the
+ * pair is read back out by narrowing.
+ */
+function hookContextOf(options: object | undefined): MenuOpenState | undefined {
+  if (options === undefined || !('hookContext' in options)) return undefined
+  return options.hookContext as MenuOpenState
+}
+
+// The default child stub: an open directory flow shows its marker, and a
+// Workspace row menu renders the two shipped entries over its owner share.
+// The two Session row lists stay empty (their entries have their own spec). A
+// stub satisfies the generic render signature only with an erased owner type.
+const renderDirectoryFlowOnly: WorkspaceBrowserProps['renderSlot'] = (name: string, owner: object, options: object | undefined) => {
+  if (name === 'sidebar.workspaces.directoryFlow') {
+    return (owner as DirectoryFlowOwnerProps).open ? <div data-testid="directory-flow" /> : null
+  }
+  if (name === 'sidebar.workspaces.workspace.menu.item') {
+    const row = owner as WorkspaceRowOwnerProps
+    const closed: MenuOpenState = [false, () => {}]
+    const props = {
+      ...row,
+      useMenuOpenState: () => hookContextOf(options) ?? closed,
+      t,
+      ...rowStandard,
+    }
+    return (
+      <>
+        <RenameWorkspaceMenuItem {...props} />
+        <DeleteWorkspaceMenuItem {...props} />
+      </>
+    )
+  }
+  return null
+}
 
 function mount(overrides: Partial<WorkspaceBrowserProps> = {}) {
   const controls = createWorkspaceShortcutControls()

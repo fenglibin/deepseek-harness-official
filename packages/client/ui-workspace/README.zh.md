@@ -11,7 +11,7 @@ kind: "package-reference"
 
 ## 概述
 
-本包让用户浏览分组或扁平的 Session 列表、为新 Session 选择 Workspace，并通过添加、重命名、重排序、搜索、fork、归档和删除 Workspace 来管理 Workspace 与 Session；Session 行菜单及其悬停按钮是可由客户端插件扩展的 slot 列表。待处理交互显示为警告点，subagent 来源的 Session 则保持隐藏。处于空闲状态且未归档、其 Session 有活动定时任务的 Session 行会显示时钟标记，其悬浮卡片会列出这些任务。规范化后仍有差异的文件夹路径会保留为独立 Workspace。添加 Workspace 需要组合目录选择器；没有目录选择器时，添加操作不可用。
+本包让用户浏览分组或扁平的 Session 列表、为新 Session 选择 Workspace，并通过添加、重命名、重排序、搜索、fork、归档和删除 Workspace 来管理 Workspace 与 Session；Session 行菜单及其悬停按钮、以及 Workspace 行的 "..." 菜单都是可由客户端插件扩展的 slot 列表。待处理交互显示为警告点，subagent 来源的 Session 则保持隐藏。处于空闲状态且未归档、其 Session 有活动定时任务的 Session 行会显示时钟标记，其悬浮卡片会列出这些任务。规范化后仍有差异的文件夹路径会保留为独立 Workspace。添加 Workspace 需要组合目录选择器；没有目录选择器时，添加操作不可用。
 
 ## 目录
 
@@ -167,6 +167,10 @@ export function apply(ctx: Context): void {
 #### 动态客户端包
 
 动态加载的 browser half 采用同一套组件协议，能拿到哪些模块取决于它走哪条 lane。Module Loader 包（`factory(require)`，即真实 Loader/Web fixture 那种）把 `@deepseek-ai/dsh-client-ui-primitives` 当作隐式 baseline external：通过 loader 的 `require` 解析 `MenuItemButton`，不要把 primitive 列为运行时依赖或打包另一份副本，仅在源码编译需要其类型时声明开发依赖。`cordis-client-runner` 闭包（生成的 Client Slot catalog 面向的读者）无法 import 任何东西：它用 `React.createElement` 渲染自己的 `role="menuitem"` `<button>`，样式经 `styles.insert` 注入，并通过同一个 `useMenuOpenState` hook 关闭菜单，catalog 里的示例就是这个写法。
+
+### Workspace 行菜单
+
+Workspace 行的 "..." 菜单是 `sidebar.workspaces.workspace.menu.item` 列表，由 WorkspaceBrowser 注册项与两个 Session 行列表一同声明。本包以插件注册自己菜单行的同一方式注册 `rename`（100）与 `delete`（200），因此插件行落在它 `order` 所指的位置；该菜单只为真实 Workspace 行渲染，"未分组" 桶没有菜单。条目拿到该行的 `workspaceId`、`displayTitle` 与 `path`，并通过 Session 行条目所用的同一个 `useMenuOpenState` hook 关闭菜单。Session action 拥有自己的整套交互，直到它在 `shell.overlay` 里拉起的对话框；而两个内置 Workspace 行改为通过属主回调 `requestRename` 与 `requestDelete` 动作，因为重命名与删除对话框是浏览器自己的局部状态。自带动作的条目会忽略这两个回调。
 
 ### 视图状态
 

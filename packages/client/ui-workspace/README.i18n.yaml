@@ -9,8 +9,8 @@
   en: b286adf3aca51710
   zh: 6122f6e7c8015197
 /deepseek-ai-dsh-client-ui-workspace/summary:
-  en: 1a76ace6a18e3ab5
-  zh: b274d1e98e133851
+  en: 202321c3d2a1c319
+  zh: 21789857bb8c1c91
 /deepseek-ai-dsh-client-ui-workspace/table-of-contents:
   en: d152484eb41ac6b4
   zh: 09388d293f9be9cb
@@ -50,6 +50,9 @@
 /deepseek-ai-dsh-client-ui-workspace/understand-the-implementation/session-row-actions/dynamic-client-package:
   en: ad4a333892f2fe92
   zh: 3a670fd401f4d7a7
+/deepseek-ai-dsh-client-ui-workspace/understand-the-implementation/workspace-row-menu:
+  en: 86080cb93350f078
+  zh: 887e6b7d8d8866e6
 /deepseek-ai-dsh-client-ui-workspace/understand-the-implementation/view-state:
   en: 83031e7505fc228a
   zh: 03e17c9428fe29fd

@@ -219,6 +219,7 @@ type SessionTreeProps = Pick<
   'useSessionStatus' | 'startSession' | 'open'
   | 'insertWorkspaceBefore' | 't' | 'usePanelInfo'
 > & PropsRenderSlots<
+  | 'sidebar.workspaces.workspace.menu.item'
   | 'sidebar.workspaces.session.menu.item'
   | 'sidebar.workspaces.session.row.action'
   | 'sidebar.session.row.leading'
@@ -512,18 +513,14 @@ function SessionTree({
             }
           }}
           drag={workspaceDragProps}
-          actions={group.workspaceId === undefined
+          actions={workspaceId === undefined
             ? undefined
             : {
-              rename: () => {
-              /* v8 ignore next -- narrowing guard: the actions object exists only for real-workspace groups. */
-                if (group.workspaceId !== undefined) onRenameRequest(group.workspaceId, group.label)
-              },
-              delete: () => {
-              /* v8 ignore next -- narrowing guard: the actions object exists only for real-workspace groups. */
-                if (group.workspaceId !== undefined) onDeleteRequest(group.workspaceId, group.label)
-              },
+              workspaceId,
+              rename: () => { onRenameRequest(workspaceId, group.label) },
+              delete: () => { onDeleteRequest(workspaceId, group.label) },
             }}
+          renderSlot={renderSlot}
         />
         {childRows.length > 0 && (
           <div role="group">

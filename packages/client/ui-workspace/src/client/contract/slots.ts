@@ -32,6 +32,14 @@
  * client plugin's action lands beside them by `order` and needs nothing from
  * the browser beyond the row identity.
  *
+ * The Workspace row's "..." menu has the same shape: every row of it is an
+ * entry of `sidebar.workspaces.workspace.menu.item`, and the shipped rows —
+ * rename, delete — are ordinary entries. The two lists differ in where their
+ * behavior lives. A Session action owns its whole interaction, up to the
+ * `shell.overlay` dialog it raises; the Workspace rename and delete dialogs
+ * are the browser's own local state, so the Workspace row hands its two
+ * requests to its entries as owner callbacks that a plugin row ignores.
+ *
  * The browser entry additionally declares two `list` seats per Session row
  * (`sidebar.session.row.leading` / `sidebar.session.row.hover`) for ambient
  * row decorations. Both take the row's Session identity and nothing else: a
@@ -80,6 +88,24 @@ export interface SessionRowOwnerProps {
   displayTitle: string
 }
 
+/**
+ * Owner share of one Workspace row menu occurrence: the row the menu belongs
+ * to, plus the two requests the browser answers with its own dialogs. A row
+ * entry that performs its own action ignores both callbacks.
+ */
+export interface WorkspaceRowOwnerProps {
+  /** Workspace the row shows. */
+  workspaceId: WorkspaceId
+  /** Row display title: the Workspace's stored title. */
+  displayTitle: string
+  /** Absolute host path of the Workspace directory. */
+  path: string | undefined
+  /** Raise this browser's rename dialog for the row. */
+  requestRename: () => void
+  /** Raise this browser's delete confirmation for the row. */
+  requestDelete: () => void
+}
+
 /** The row menu's open state as its owner holds it: the `useState` pair. */
 export type MenuOpenState = readonly [open: boolean, setOpen: (open: boolean) => void]
 
@@ -93,12 +119,22 @@ export type UseMenuOpenState = () => MenuOpenState
 /**
  * Bind the row's render occurrence into the entries' `useMenuOpenState` hook:
  * the owner supplies its open-state pair as the occurrence's `hookContext`,
- * and the hook hands that pair back.
+ * and the hook hands that pair back. Both row menus are root-scoped and carry
+ * the same pair, so each declares its own factory over this one binding.
  * @param _standard - framework standard props (unused).
  * @param state - the menu's open-state pair from the render occurrence.
  * @returns the hook the entry calls.
  */
 export const menuOpenStateFactory: SlotHookFactory<'sidebar.workspaces.session.menu.item', UseMenuOpenState> =
+  (_standard, state) => () => state
+
+/**
+ * The same binding for the Workspace row menu's entries.
+ * @param _standard - framework standard props (unused).
+ * @param state - the menu's open-state pair from the render occurrence.
+ * @returns the hook the entry calls.
+ */
+export const workspaceMenuOpenStateFactory: SlotHookFactory<'sidebar.workspaces.workspace.menu.item', UseMenuOpenState> =
   (_standard, state) => () => state
 
 /**
@@ -182,6 +218,51 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      * handling to keep the row from opening.
      */
     'sidebar.workspaces.session.row.action': { kind: 'list'; scope: 'root'; owner: SessionRowOwnerProps }
+    /**
+     * The rows of one Workspace's "..." menu, in ascending `order`.
+     * ui-workspace registers the shipped rows here — `rename` (100) and
+     * `delete` (200) — so a plugin row is placed by its own `order` among
+     * them. The menu renders only for a real Workspace row: the ungrouped
+     * bucket has no Workspace and no menu. Use a package-namespaced `id`;
+     * reusing a shipped id at another `priority` shadows that row. Each entry
+     * renders one `role="menuitem"` `<button>` (the shipped rows use
+     * ui-primitives' `MenuItemButton`, which adds the host styling and
+     * `separatorBefore`), decides its own visibility from its own state, and
+     * dismisses the menu through the injected `useMenuOpenState` hook after
+     * acting; the list's keyboard walk and focus return read the DOM, so any
+     * such button joins them. An entry that brings its own action owns that
+     * action outright; the two shipped rows instead call the owner callbacks
+     * `requestRename` and `requestDelete`, which raise the dialogs the browser
+     * holds as its own local state. Labels come from the contributing
+     * package's locale namespace.
+     * @example
+     * return {
+     *   inject: ['slots'],
+     *   apply(ctx) {
+     *     const copyLabel = 'Copy path' // Localize in the contributing package.
+     *     ctx.slots.inject('sidebar.workspaces.workspace.menu.item', () => ctx.slots.register(
+     *       { name: 'sidebar.workspaces.workspace.menu.item', id: 'copy-workspace-path', order: 500 },
+     *       ({ path, useMenuOpenState }) => {
+     *         const [, setMenuOpen] = useMenuOpenState()
+     *         return React.createElement(
+     *           'button',
+     *           { type: 'button', role: 'menuitem', onClick: () => { setMenuOpen(false); void navigator.clipboard.writeText(path) } },
+     *           copyLabel,
+     *         )
+     *       },
+     *     ))
+     *   },
+     * }
+     */
+    'sidebar.workspaces.workspace.menu.item': {
+      kind: 'list'
+      scope: 'root'
+      owner: WorkspaceRowOwnerProps
+      hookContext: MenuOpenState
+      inject: { hooks: {
+        menuOpenState: SlotHookFactory<'sidebar.workspaces.workspace.menu.item', UseMenuOpenState>
+      } }
+    }
   }
 }
 
@@ -283,6 +364,12 @@ export type SessionMenuItemProps<Injected extends object = object> =
 /** Props of one shipped row hover button: owner share + locale seat + the entry's own injected share. */
 export type SessionRowActionProps<Injected extends object = object> =
   PropsRuntime<'sidebar.workspaces.session.row.action'>
+  & PropsLocale<'workspace'>
+  & InjectFace<Injected>
+
+/** Props of one Workspace row-menu entry: owner share + locale seat + the entry's own injected share. */
+export type WorkspaceMenuItemProps<Injected extends object = object> =
+  PropsRuntime<'sidebar.workspaces.workspace.menu.item'>
   & PropsLocale<'workspace'>
   & InjectFace<Injected>
 

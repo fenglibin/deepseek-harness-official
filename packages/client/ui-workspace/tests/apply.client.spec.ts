@@ -15,7 +15,7 @@ import type { WorkspaceBrowserInjected, WorkspacePickerInjected } from '@deepsee
 import {
   type ArchiveSessionInjected, type ForkSessionInjected, menuOpenStateFactory, type PinSessionInjected,
   type RenameSessionInjected, type RowToastInjected, type SessionArchiveConfirmInjected, type SessionRenameDialogInjected,
-  type WorkspaceViewStoreHandle,
+  type WorkspaceViewStoreHandle, workspaceMenuOpenStateFactory,
 } from '../src/client/contract/slots.ts'
 import { WorkspaceBrowser } from '../src/client/rows/WorkspaceBrowser.tsx'
 import { ArchiveSessionMenuItem, ArchiveSessionRowButton, SessionArchiveConfirmDialog } from '../src/client/session-actions/ArchiveSession.tsx'
@@ -23,6 +23,8 @@ import { ForkSessionMenuItem } from '../src/client/session-actions/ForkSession.t
 import { PinSessionMenuItem, PinSessionRowButton } from '../src/client/session-actions/PinSession.tsx'
 import { RenameSessionMenuItem, SessionRenameDialog } from '../src/client/session-actions/RenameSession.tsx'
 import { RowActionToast } from '../src/client/session-actions/RowActionToast.tsx'
+import { DeleteWorkspaceMenuItem } from '../src/client/workspace-actions/DeleteWorkspace.tsx'
+import { RenameWorkspaceMenuItem } from '../src/client/workspace-actions/RenameWorkspace.tsx'
 import { WorkspacePicker } from '../src/client/WorkspacePicker.tsx'
 import { FLAT_SESSION_ORDER_KEY } from '../src/client/stores.ts'
 import { UNGROUPED_KEY } from '../src/client/tree.ts'
@@ -144,7 +146,8 @@ type HoleName = 'sidebar.workspaces' | 'conversation.hero.workspace' | 'conversa
 
 const MENU_ITEM = 'sidebar.workspaces.session.menu.item'
 const ROW_ACTION = 'sidebar.workspaces.session.row.action'
-type RowListName = typeof MENU_ITEM | typeof ROW_ACTION | 'shell.overlay'
+const WORKSPACE_MENU = 'sidebar.workspaces.workspace.menu.item'
+type RowListName = typeof MENU_ITEM | typeof ROW_ACTION | typeof WORKSPACE_MENU | 'shell.overlay'
 
 /** Declare any subset of the holes with a single root registration ('root' is a single slot); the overlay is a list. */
 function declare(slots: SlotRegistry, ...names: HoleName[]): () => void {
@@ -268,6 +271,28 @@ describe('ui-workspace apply', () => {
     for (const id of ['pin', 'archive']) {
       expect(faceOf(entry(b.slots, MENU_ITEM, id))).not.toHaveProperty('notify')
       expect(faceOf(entry(b.slots, ROW_ACTION, id))).not.toHaveProperty('notify')
+    }
+  })
+
+  it('declares the Workspace row menu list and registers the two shipped rows into it', async () => {
+    const b = await bench()
+    declare(b.slots, 'sidebar.workspaces')
+    await b.ctx.plugin({ inject: [...inject], apply }).await()
+    // The list binds the row's open state into every entry's hook; it carries
+    // no other common face.
+    expect(b.slots.spec(WORKSPACE_MENU)).toEqual({
+      kind: 'list', scope: 'root', inject: { hooks: { menuOpenState: workspaceMenuOpenStateFactory } },
+    })
+    const rows = b.slots.entries(WORKSPACE_MENU)
+      .map(registration => [registration.options.id, registration.options.order, registration.component, registration.locale])
+    expect(rows).toEqual([
+      ['rename', 100, RenameWorkspaceMenuItem, 'workspace'],
+      ['delete', 200, DeleteWorkspaceMenuItem, 'workspace'],
+    ])
+    // Neither row owns an interaction of its own: both act through the owner
+    // callbacks the row hands them, so neither declares an inject face.
+    for (const id of ['rename', 'delete']) {
+      expect(entry(b.slots, WORKSPACE_MENU, id).inject).toBeUndefined()
     }
   })
 

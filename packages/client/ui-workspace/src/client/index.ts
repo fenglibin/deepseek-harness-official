@@ -6,9 +6,10 @@
  * Workspaces through the global useWorkspaces hook, and each declares its
  * own `single` directory-flow child hole for the composed picker package's
  * client half. WorkspaceBrowser additionally declares the two Session row
- * action lists, and this apply registers the shipped actions — pin, rename,
- * fork, archive — into them the way any client plugin would, each with its
- * own behavior, plus the rename dialog and the row-action notice into
+ * action lists and the Workspace row menu list, and this apply registers the
+ * shipped actions into them the way any client plugin would — pin, rename,
+ * fork and archive for a Session row, rename and delete for a Workspace row —
+ * plus the rename dialog and the row-action notice into
  * `shell.overlay` (see the contract module doc). It also declares two
  * Session-row seats: the leading decoration a row renders only while its own
  * primary state is idle, and the section the row's hover card renders between
@@ -39,7 +40,7 @@ import {
   type ArchiveSessionInjected, type ForkSessionInjected, menuOpenStateFactory, type PinSessionInjected,
   type SessionArchiveConfirmInjected, type SessionArchiveConfirmRequest,
   type RenameSessionInjected, type RowToast, type RowToastInjected, type RowToastState, type SessionRenameDialogInjected,
-  type WorkspaceBrowserInjected, type WorkspacePickerInjected,
+  type WorkspaceBrowserInjected, workspaceMenuOpenStateFactory, type WorkspacePickerInjected,
 } from './contract/slots.ts'
 import { createWorkspaceShortcutControls, installWorkspaceShortcuts } from './shortcuts.ts'
 import { UiWorkspaceService } from './navigation.ts'
@@ -51,6 +52,8 @@ import { ForkSessionMenuItem } from './session-actions/ForkSession.tsx'
 import { PinSessionMenuItem, PinSessionRowButton } from './session-actions/PinSession.tsx'
 import { RenameSessionMenuItem, SessionRenameDialog } from './session-actions/RenameSession.tsx'
 import { RowActionToast } from './session-actions/RowActionToast.tsx'
+import { DeleteWorkspaceMenuItem } from './workspace-actions/DeleteWorkspace.tsx'
+import { RenameWorkspaceMenuItem } from './workspace-actions/RenameWorkspace.tsx'
 import { WorkspacePicker } from './WorkspacePicker.tsx'
 import { en, zh, type WorkspaceKey } from './locales.ts'
 
@@ -61,6 +64,7 @@ export type {
   SessionRowScheduleOwnerProps,
   WorkspaceBrowserProps,
   WorkspacePickerInjected, WorkspacePickerProps,
+  WorkspaceRowOwnerProps,
 } from './contract/slots.ts'
 export type { WorkspaceKey } from './locales.ts'
 
@@ -265,6 +269,9 @@ export function apply(ctx: Context): void {
         // Every row entry reads the menu's open state through a hook bound
         // from the row's render occurrence (the owner passes the state pair
         // as hookContext).
+        'sidebar.workspaces.workspace.menu.item': {
+          kind: 'list', scope: 'root', inject: { hooks: { menuOpenState: workspaceMenuOpenStateFactory } },
+        },
         'sidebar.workspaces.session.menu.item': {
           kind: 'list', scope: 'root', inject: { hooks: { menuOpenState: menuOpenStateFactory, shortcuts: ctx.shortcuts.catalog } },
         },
@@ -291,6 +298,12 @@ export function apply(ctx: Context): void {
   ctx.slots.inject('sidebar.workspaces.session.row.action', function* () {
     yield ctx.slots.register({ name: 'sidebar.workspaces.session.row.action', id: 'archive', order: 100, locale: NS, inject: archiveInjected }, ArchiveSessionRowButton)
     yield ctx.slots.register({ name: 'sidebar.workspaces.session.row.action', id: 'pin', order: 200, locale: NS, inject: pinInjected }, PinSessionRowButton)
+  })
+  // The Workspace row's two shipped entries act through the owner callbacks
+  // the row hands them, so they register with no inject face of their own.
+  ctx.slots.inject('sidebar.workspaces.workspace.menu.item', function* () {
+    yield ctx.slots.register({ name: 'sidebar.workspaces.workspace.menu.item', id: 'rename', order: 100, locale: NS }, RenameWorkspaceMenuItem)
+    yield ctx.slots.register({ name: 'sidebar.workspaces.workspace.menu.item', id: 'delete', order: 200, locale: NS }, DeleteWorkspaceMenuItem)
   })
   // The surfaces the actions raise live in the frame-wide layer: they must
   // outlive the row menu the action sat in.

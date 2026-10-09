@@ -700,7 +700,7 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
     ],
     replaceRisk: 'shadows-shipped-ui',
     example: 'return {\n  inject: [\'slots\'],\n  apply(ctx) {\n    ctx.slots.inject(\'conversation.hero.workspace.directoryFlow\', () => ctx.slots.register(\n      { name: \'conversation.hero.workspace.directoryFlow\' },\n      () => React.createElement(\'div\', null, \'hello\'),\n    ))\n  },\n}',
-    source: 'packages/client/ui-workspace/src/client/contract/slots.ts:117',
+    source: 'packages/client/ui-workspace/src/client/contract/slots.ts:148',
   },
   {
     key: 'conversation.input.activity',
@@ -3787,7 +3787,7 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
     ],
     replaceRisk: 'none',
     example: 'return {\n  inject: [\'slots\'],\n  apply(ctx) {\n    ctx.slots.inject(\'sidebar.session.row.hover\', () => ctx.slots.register(\n      { name: \'sidebar.session.row.hover\', id: \'my-entry\', order: 100, label: \'My entry\' },\n      () => React.createElement(\'div\', null, \'hello\'),\n    ))\n  },\n}',
-    source: 'packages/client/ui-workspace/src/client/contract/slots.ts:134',
+    source: 'packages/client/ui-workspace/src/client/contract/slots.ts:165',
   },
   {
     key: 'sidebar.session.row.leading',
@@ -3839,7 +3839,7 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
     ],
     replaceRisk: 'none',
     example: 'return {\n  inject: [\'slots\'],\n  apply(ctx) {\n    ctx.slots.inject(\'sidebar.session.row.leading\', () => ctx.slots.register(\n      { name: \'sidebar.session.row.leading\', id: \'my-entry\', order: 100, label: \'My entry\' },\n      () => React.createElement(\'div\', null, \'hello\'),\n    ))\n  },\n}',
-    source: 'packages/client/ui-workspace/src/client/contract/slots.ts:129',
+    source: 'packages/client/ui-workspace/src/client/contract/slots.ts:160',
   },
   {
     key: 'sidebar.settings',
@@ -3962,7 +3962,7 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
     ],
     replaceRisk: 'shadows-shipped-ui',
     example: 'return {\n  inject: [\'slots\'],\n  apply(ctx) {\n    ctx.slots.inject(\'sidebar.workspaces.directoryFlow\', () => ctx.slots.register(\n      { name: \'sidebar.workspaces.directoryFlow\' },\n      () => React.createElement(\'div\', null, \'hello\'),\n    ))\n  },\n}',
-    source: 'packages/client/ui-workspace/src/client/contract/slots.ts:119',
+    source: 'packages/client/ui-workspace/src/client/contract/slots.ts:150',
   },
   {
     key: 'sidebar.workspaces.session.menu.item',
@@ -4017,7 +4017,7 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
     ],
     replaceRisk: 'none',
     example: 'return {\n  inject: [\'slots\'],\n  apply(ctx) {\n    const copyLabel = \'Copy Session ID\' // Localize in the contributing package.\n    ctx.slots.inject(\'sidebar.workspaces.session.menu.item\', () => ctx.slots.register(\n      { name: \'sidebar.workspaces.session.menu.item\', id: \'copy-session-id\', order: 500 },\n      ({ sessionId, useMenuOpenState }) => {\n        const [, setMenuOpen] = useMenuOpenState()\n        return React.createElement(\n          \'button\',\n          { type: \'button\', role: \'menuitem\', onClick: () => { setMenuOpen(false); void navigator.clipboard.writeText(sessionId) } },\n          copyLabel,\n        )\n      },\n    ))\n  },\n}',
-    source: 'packages/client/ui-workspace/src/client/contract/slots.ts:166',
+    source: 'packages/client/ui-workspace/src/client/contract/slots.ts:197',
   },
   {
     key: 'sidebar.workspaces.session.row.action',
@@ -4070,7 +4070,60 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
     ],
     replaceRisk: 'none',
     example: 'return {\n  inject: [\'slots\'],\n  apply(ctx) {\n    ctx.slots.inject(\'sidebar.workspaces.session.row.action\', () => ctx.slots.register(\n      { name: \'sidebar.workspaces.session.row.action\', id: \'my-entry\', order: 100, label: \'My entry\' },\n      () => React.createElement(\'div\', null, \'hello\'),\n    ))\n  },\n}',
-    source: 'packages/client/ui-workspace/src/client/contract/slots.ts:184',
+    source: 'packages/client/ui-workspace/src/client/contract/slots.ts:215',
+  },
+  {
+    key: 'sidebar.workspaces.workspace.menu.item',
+    kind: 'list',
+    scope: 'root',
+    summary: 'The rows of one Workspace\'s "..." menu, in ascending `order`.',
+    doc: 'The rows of one Workspace\'s "..." menu, in ascending `order`.\nui-workspace registers the shipped rows here — `rename` (100) and\n`delete` (200) — so a plugin row is placed by its own `order` among\nthem. The menu renders only for a real Workspace row: the ungrouped\nbucket has no Workspace and no menu. Use a package-namespaced `id`;\nreusing a shipped id at another `priority` shadows that row. Each entry\nrenders one `role="menuitem"` `<button>` (the shipped rows use\nui-primitives\' `MenuItemButton`, which adds the host styling and\n`separatorBefore`), decides its own visibility from its own state, and\ndismisses the menu through the injected `useMenuOpenState` hook after\nacting; the list\'s keyboard walk and focus return read the DOM, so any\nsuch button joins them. An entry that brings its own action owns that\naction outright; the two shipped rows instead call the owner callbacks\n`requestRename` and `requestDelete`, which raise the dialogs the browser\nholds as its own local state. Labels come from the contributing\npackage\'s locale namespace.',
+    registerOptions: [
+      {
+        name: 'id',
+        requirement: 'required',
+        type: 'string',
+        doc: 'Your cell key. Use an id of your own: a fresh id is added beside the shipped entries, while reusing a shipped id puts you in THAT cell and replaces it. Owners that filter by id address you by it.',
+      },
+      {
+        name: 'order',
+        requirement: 'optional',
+        type: 'number',
+        doc: 'Position among the entries, ascending (default 0).',
+      },
+      {
+        name: 'label',
+        requirement: 'optional',
+        type: 'string | (() => string)',
+        doc: 'Display text where the owner projects one (nav rows, tabs). A thunk is re-read on every projection, so localized text follows the active locale without re-registering.',
+      },
+    ],
+    ownerProps: [
+      '/**\n * Owner share of one Workspace row menu occurrence: the row the menu belongs\n * to, plus the two requests the browser answers with its own dialogs. A row\n * entry that performs its own action ignores both callbacks.\n */\nexport interface WorkspaceRowOwnerProps {\n  /** Workspace the row shows. */\n  workspaceId: WorkspaceId\n  /** Row display title: the Workspace\'s stored title. */\n  displayTitle: string\n  /** Absolute host path of the Workspace directory. */\n  path: string | undefined\n  /** Raise this browser\'s rename dialog for the row. */\n  requestRename: () => void\n  /** Raise this browser\'s delete confirmation for the row. */\n  requestDelete: () => void\n}',
+    ],
+    ownerPropsReferences: [
+      'Workspace',
+    ],
+    standardProps: [
+      'useResource: UseResource',
+      'useWorkspaces: SnapshotSelectorHook<WorkspaceSnapshot>',
+      'usePanelInfo: UsePanelInfo',
+      'useSessions: UseSessions',
+      'useSessionStatus: UseSessionStatus',
+      'useSessionRetainInfo: UseSessionRetainInfo',
+      'useWorkspaces: SnapshotSelectorHook<WorkspaceSnapshot>',
+    ],
+    keyDomain: '',
+    hookContext: 'MenuOpenState',
+    slotInject: '{ hooks: { menuOpenState: SlotHookFactory<\'sidebar.workspaces.workspace.menu.item\', UseMenuOpenState> } }',
+    declaredBy: 'an entry in \'sidebar.workspaces\' (client-ui-workspace), so it exists while that entry is mounted',
+    occupants: [
+      'client-ui-workspace RenameWorkspaceMenuItem id \'rename\'',
+      'client-ui-workspace DeleteWorkspaceMenuItem id \'delete\'',
+    ],
+    replaceRisk: 'none',
+    example: 'return {\n  inject: [\'slots\'],\n  apply(ctx) {\n    const copyLabel = \'Copy path\' // Localize in the contributing package.\n    ctx.slots.inject(\'sidebar.workspaces.workspace.menu.item\', () => ctx.slots.register(\n      { name: \'sidebar.workspaces.workspace.menu.item\', id: \'copy-workspace-path\', order: 500 },\n      ({ path, useMenuOpenState }) => {\n        const [, setMenuOpen] = useMenuOpenState()\n        return React.createElement(\n          \'button\',\n          { type: \'button\', role: \'menuitem\', onClick: () => { setMenuOpen(false); void navigator.clipboard.writeText(path) } },\n          copyLabel,\n        )\n      },\n    ))\n  },\n}',
+    source: 'packages/client/ui-workspace/src/client/contract/slots.ts:252',
   },
   {
     key: 'tool.call.images',

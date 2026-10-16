@@ -213,6 +213,16 @@ if [ "$DO_PULL" = 1 ]; then
   if [ -f "$PLUGINS_REPO/scripts/patch-dsh-host-compat.mjs" ]; then
     run_step '撤销宿主兼容补丁（升级后由插件安装流程重新打上）' "$REVERT_LOG" \
       sh -c "cd '$PLUGINS_REPO' && DSH_REPO='$REPO' node scripts/patch-dsh-host-compat.mjs --revert"
+    # 补丁可能已经随提交进了本仓库的分支（changes/0011 的 ignorable 补丁就是这样进了 master，
+    # 官方 upstream 上没有）。这时上面这一步"撤销"剥掉的是 **HEAD 里本来就有的代码**，
+    # 于是工作区反而变脏、`git pull` 被拒 —— 表现就是「discard 完再跑一次又脏了」。
+    # 判定：HEAD 里带 fork-patch 标记、而工作区不带，说明差异只来自这次撤销，恢复成 HEAD 形态。
+    for f in $(git diff --name-only); do
+      if git show "HEAD:$f" 2>/dev/null | grep -q 'fork-patch'; then
+        echo "  · ${f}：补丁已随提交进入 HEAD，恢复为 HEAD 形态（不再当工作区补丁撤销）"
+        git checkout -- "$f"
+      fi
+    done
   fi
   echo ""
   echo '── 检查工作区 ──'

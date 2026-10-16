@@ -15,6 +15,9 @@
 #          不同步的话每一步 `dsh plugin add` 都失败；
 #        · 把 `@deepseek-ai/dsh-*` 全部钉回新版本 —— 只改直接依赖不够，其余靠 peer 图解析；
 #        · 迁移第三方插件的精确版本豁免（可用 --no-third-party 关掉）。
+#   4b) 宿主符号形态契约检查（插件仓库的 scripts/verify-host-contract.mjs）：
+#       版本对齐只保证版本号对得上；宿主还可能改了**形状**却一声不吭（预设形参 / 包导出
+#       形态 / 设置入口位置），症状是"装进去的功能不生效"或"实例起不来"。这一步在构建前拦下。
 #   5) 插件仓库重装 + 三层验证（install-or-update.sh，可用 --no-plugins 跳过）
 #   6) 启动，并自检启动日志里没有门禁禁用 / 启动失败
 #
@@ -94,6 +97,8 @@ BUILD_LOG=/tmp/dsh-upgrade-build.log
 ALIGN_LOG=/tmp/dsh-upgrade-align.log
 PLUGINS_LOG=/tmp/dsh-upgrade-plugins.log
 RUN_LOG=/tmp/dsh-official-$PROFILE.log
+# 启动等待期的日志快照：实例持有 RUN_LOG 的写端，直接 grep 会等不到 EOF。
+STARTING_LOG=/tmp/dsh-upgrade-starting.log
 
 current_version() { node -p "require('$REPO/package.json').version" 2>/dev/null || echo ''; }
 
@@ -145,26 +150,52 @@ start_instance() {
     (cd "$REPO" && DSH_HOME="$DSH_HOME_DIR" NODE_OPTIONS="--max-old-space-size=12288" \
       nohup pnpm dsh --profile "$PROFILE" --port "$PORT" >>"$RUN_LOG" 2>&1 &)
   fi
+  # 等**新实例自己打印出访问地址**，而不是等端口在听：端口可能正被上一次残留的实例占着，
+  # 那时 `lsof` 立刻成功、脚本以为起来了，而新实例其实 `EADDRINUSE` 退出——
+  # 症状是一堆 `waiting for services: webServer`，排查方向完全不对（本次实测就是这个）。
   waited=0
   while [ "$waited" -lt 60 ]; do
-    if lsof -t -i:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then break; fi
+    cp "$RUN_LOG" "$STARTING_LOG" 2>/dev/null || : >"$STARTING_LOG"
+    if grep -qE '^dsh web: http' "$STARTING_LOG"; then break; fi
     waited=$((waited + 1))
     sleep 1
   done
-  lsof -t -i:"$PORT" -sTCP:LISTEN >/dev/null 2>&1 || fail "实例没起来（等了 60 秒），看日志：${RUN_LOG}"
+  cp "$RUN_LOG" "$STARTING_LOG" 2>/dev/null || : >"$STARTING_LOG"
+  if ! grep -qE '^dsh web: http' "$STARTING_LOG"; then
+    fail "实例没起来（等了 60 秒），看日志：${RUN_LOG}"
+  fi
   echo "✓ 已监听 ${PORT}（日志 ${RUN_LOG}）"
 }
 
 check_startup_log() {
+  # 先拍快照再判：**实例一直持有日志的写端**，任何「读到 EOF 才返回」的读法（grep / cat / tail）
+  # 都会一直等下去 —— 日志干净时更是必然，因为没有任何匹配能让 `grep -q` 提前返回，
+  # 于是「升级其实很成功」表现为「升级卡住不退出」。cp 按当前文件大小读，不会等写端关闭。
+  local snapshot="${RUN_LOG}.check"
+  # 访问地址是监听端口之后才打印的：拍早了会拿到半截日志，下面的 URL 判空又会在 `set -e`
+  # 下把整个脚本悄悄终止（实测日志停在这一步、退出码 1，什么都没说）。
+  local waited=0
+  while [ "$waited" -lt 30 ]; do
+    cp "$RUN_LOG" "$snapshot" 2>/dev/null || : >"$snapshot"
+    if grep -qE '^dsh web: http' "$snapshot"; then break; fi
+    waited=$((waited + 1))
+    sleep 1
+  done
   # 版本门禁的三类输出任一出现都意味着这次升级没真正生效——直接失败，不要留给用户在页面上发现。
-  if grep -qE 'disabling profile plugin row|skipping profile bundle|Plugins waiting for services|startup failed' "$RUN_LOG"; then
+  if grep -qE 'disabling profile plugin row|skipping profile bundle|Plugins waiting for services|startup failed' "$snapshot"; then
     echo ""
     echo '✗ 启动日志里仍有版本门禁的禁用项：'
-    grep -E 'disabling profile plugin row|skipping profile bundle|Plugins waiting for services|startup failed' "$RUN_LOG" | head -20
+    grep -E 'disabling profile plugin row|skipping profile bundle|Plugins waiting for services|startup failed' "$snapshot" | head -20
     fail "完整日志：${RUN_LOG}"
   fi
-  url=$(grep -E '^dsh web: http' "$RUN_LOG" | tail -1 || true)
-  [ -n "$url" ] && echo "  ${url#dsh web: }"
+  # 写成 if 而非 `[ -n "$url" ] && echo`：后者在 url 为空时整条列表返回非零，
+  # `set -e` 会把"已经升级成功"变成一次静默失败。
+  url=$(grep -E '^dsh web: http' "$snapshot" | tail -1)
+  if [ -n "$url" ]; then
+    echo "  ${url#dsh web: }"
+  else
+    echo "  ⚠️ 日志里没有访问地址（实例可能没起来），完整日志：${RUN_LOG}"
+  fi
 }
 
 echo "官方 dsh 升级：${REPO}"
@@ -234,6 +265,19 @@ else
   echo "── profile 对齐：插件仓库里没有 scripts/align-host.mjs（${PLUGINS_REPO}），跳过 ──"
   echo '   宿主升级后这一步不能省：它会把 profile 里的宿主包钉回新版本，'
   echo '   否则重启时官方版本门禁会禁用整片挂载行、实例起不来。'
+fi
+
+# ── 4b) 宿主符号形态契约检查 ─────────────────────────────────────────────────
+# 版本对齐只保证"版本号对得上"。宿主还可能把**形状**改了而不发任何告警：预设形参、包导出
+# 形态、设置入口位置（0.2.1-alpha.3 三处都改了，版本号全绿但实例起不来、客户端 bundle 全灭）。
+# 这一步在**构建之前**拦住它们，代价几秒；放到构建后，症状会变成"装进去的功能不生效"。
+CONTRACT_LOG=/tmp/dsh-upgrade-contract.log
+if [ -f "$PLUGINS_REPO/scripts/verify-host-contract.mjs" ]; then
+  run_step '宿主符号形态契约检查' "$CONTRACT_LOG" \
+    sh -c "cd '$PLUGINS_REPO' && node scripts/verify-host-contract.mjs --dsh '$REPO' --profile-dir '$DSH_HOME_DIR/profiles/$PROFILE'"
+else
+  echo ''
+  echo "── 宿主契约检查：插件仓库里没有 scripts/verify-host-contract.mjs（${PLUGINS_REPO}），跳过 ──"
 fi
 
 # ── 5) 插件仓库重装 + 三层验证 ───────────────────────────────────────────────

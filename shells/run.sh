@@ -24,4 +24,4 @@
 # into an unbounded stall that leaves neither. Capture a snapshot deliberately
 # (from a live inspector session, or with a small heap in a reproduction).
 cd ..
-DSH_HOME="$HOME/.dsh-official" NODE_OPTIONS="--max-old-space-size=12288" pnpm dsh --profile web --port 13080
+DSH_HOME="$HOME/.dsh-official" NODE_OPTIONS="--max-old-space-size=12288" pnpm run dsh --profile web --port 13080

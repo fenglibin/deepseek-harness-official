@@ -91,7 +91,6 @@ command -v git >/dev/null 2>&1 || fail '缺 git'
 export CODEBUDDY_SAFE_DELETE_ENABLED=0
 
 PULL_LOG=/tmp/dsh-upgrade-pull.log
-REVERT_LOG=/tmp/dsh-upgrade-revert.log
 INSTALL_LOG=/tmp/dsh-upgrade-install.log
 BUILD_LOG=/tmp/dsh-upgrade-build.log
 ALIGN_LOG=/tmp/dsh-upgrade-align.log
@@ -207,23 +206,9 @@ echo "  当前宿主版本：${VERSION_BEFORE:-（读不到）}"
 
 # ── 1) 拉代码 ────────────────────────────────────────────────────────────────
 if [ "$DO_PULL" = 1 ]; then
-  # 插件仓库给宿主源码打的两处兼容补丁（会话事件 ignorable / 空闲取消落日志）会让工作区变 dirty，
-  # 而 pull 撞上被改过的源码轻则冲突、重则把补丁连同官方改动一起搅乱。补丁是可重建的（幂等、
-  # 有备份、可撤销），所以 pull 之前先撤掉，升级后由插件安装流程重新打上。
-  if [ -f "$PLUGINS_REPO/scripts/patch-dsh-host-compat.mjs" ]; then
-    run_step '撤销宿主兼容补丁（升级后由插件安装流程重新打上）' "$REVERT_LOG" \
-      sh -c "cd '$PLUGINS_REPO' && DSH_REPO='$REPO' node scripts/patch-dsh-host-compat.mjs --revert"
-    # 补丁可能已经随提交进了本仓库的分支（changes/0011 的 ignorable 补丁就是这样进了 master，
-    # 官方 upstream 上没有）。这时上面这一步"撤销"剥掉的是 **HEAD 里本来就有的代码**，
-    # 于是工作区反而变脏、`git pull` 被拒 —— 表现就是「discard 完再跑一次又脏了」。
-    # 判定：HEAD 里带 fork-patch 标记、而工作区不带，说明差异只来自这次撤销，恢复成 HEAD 形态。
-    for f in $(git diff --name-only); do
-      if git show "HEAD:$f" 2>/dev/null | grep -q 'fork-patch'; then
-        echo "  · ${f}：补丁已随提交进入 HEAD，恢复为 HEAD 形态（不再当工作区补丁撤销）"
-        git checkout -- "$f"
-      fi
-    done
-  fi
+  # 2026-11-13 之前插件仓库会在这里撤销它给宿主源码打的两处补丁（会话事件 ignorable /
+  # 空闲取消落日志），否则 pull 会撞上 dirty 工作区。两处补丁现在都由插件侧原生实现
+  # （官方 plugin record 通道 + agent/created 上的 cancel 包装），宿主保持纯净，本步骤删除。
   echo ""
   echo '── 检查工作区 ──'
   if [ "$(git status --porcelain)" != '' ]; then
@@ -232,7 +217,7 @@ if [ "$DO_PULL" = 1 ]; then
     else
       git status --porcelain | head -10
       fail '工作区不干净，`git pull` 会被拒绝或产生冲突。
-  常见来源：本仓库跑测试留下的快照（snapshots/**）、插件仓库的宿主补丁（上面已撤销）。
+  常见来源：本仓库跑测试留下的快照（snapshots/**）、手工改过的源码。
   处理：提交或丢弃这些改动后重跑；确认无碍时加 --allow-dirty。'
     fi
   else

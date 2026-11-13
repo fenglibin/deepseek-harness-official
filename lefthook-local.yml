@@ -1,0 +1,15 @@
+# Fork-local lefthook overrides. Lefthook merges this file over lefthook.yml by
+# job name, and upstream never ships it, so upstream merges do not conflict.
+#
+# Why: the upstream pre-push job runs `pnpm run typecheck`, which assumes
+# node/pnpm are on PATH. That only holds for shells that sourced ~/.zshrc;
+# IDE/GUI git clients inherit launchd's minimal PATH and the hook fails with
+# `sh: pnpm: command not found`. shells/pre-push-typecheck.sh resolves node and
+# pnpm from their usual install dirs and then runs the same script.
+#
+# Maintenance: lefthook merges jobs by name, so jobs upstream adds keep running,
+# but a renamed or rewritten `typecheck` job would be shadowed by this override.
+pre-push:
+  jobs:
+    - name: typecheck
+      run: sh shells/pre-push-typecheck.sh

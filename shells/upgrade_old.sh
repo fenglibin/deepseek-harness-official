@@ -1,0 +1,315 @@
+#!/bin/sh
+# 官方 dsh 的一次完整升级 —— 把「升级后实例起不来」这件事提前到本脚本里做完。
+#
+# 为什么需要它：宿主的 rc 版本是按**精确 peer** 判兼容的（`@deepseek-ai/dsh-scope: 0.2.0-rc.1`
+# 这类写法），而 profile 里已装的插件不会因为 `git pull` 自己跟着走。于是升级 + 重启会得到
+# 一片 `disabling profile plugin row …` 和一句 `startup failed: 1 required plugin did not
+# activate`，而排查要从 startup 日志里逐条找被禁的行（本机 2026-09-30 实际发生过）。
+#
+# 一次升级要做的事，按顺序：
+#   1) 拉代码（--ff-only，避免把 fork 的提交历史搅乱）
+#   2) 装依赖 + 编译（客户端产物不重新构建的话，实例起来也是空页面）
+#   3) 停实例（带着旧代码跑着的实例会一直持有旧服务）
+#   4) profile 对齐到新宿主版本（插件仓库的 scripts/align-host.mjs）：
+#        · 同步发布年龄豁免名单 —— 新版本刚发布时会被 pnpm 的 supply-chain 策略拒绝，
+#          不同步的话每一步 `dsh plugin add` 都失败；
+#        · 把 `@deepseek-ai/dsh-*` 全部钉回新版本 —— 只改直接依赖不够，其余靠 peer 图解析；
+#        · 迁移第三方插件的精确版本豁免（可用 --no-third-party 关掉）。
+#   4b) 宿主符号形态契约检查（插件仓库的 scripts/verify-host-contract.mjs）：
+#       版本对齐只保证版本号对得上；宿主还可能改了**形状**却一声不吭（预设形参 / 包导出
+#       形态 / 设置入口位置），症状是"装进去的功能不生效"或"实例起不来"。这一步在构建前拦下。
+#   5) 插件仓库重装 + 三层验证（install-or-update.sh，可用 --no-plugins 跳过）
+#   6) 启动，并自检启动日志里没有门禁禁用 / 启动失败
+#
+# 默认目标与 run.sh、stop.sh 一致：home=~/.dsh-official  profile=web  端口=13080。
+# 改动其中任意一个时，本脚本不再调用 stop.sh / run.sh（它们把目标写死），改用内建启停，
+# 否则会去重启另一个 profile。改造版（~/.dsh :3080）永远不碰。
+#
+# 用法：
+#   ./upgrade.sh                        # 完整升级（拉代码 → 编译 → 对齐 → 装插件 → 启动自检）
+#   ./upgrade.sh --no-pull              # 代码已手动更新，跳过 git pull
+#   ./upgrade.sh --no-build             # 跳过 pnpm install 与编译
+#   ./upgrade.sh --no-plugins           # 不重装插件仓库（只做宿主侧对齐）
+#   ./upgrade.sh --no-third-party       # 不迁移第三方插件的版本豁免
+#   ./upgrade.sh --no-restart           # 只升级不启动
+#   ./upgrade.sh --dry-run              # 只打印将要执行的动作
+#   ./upgrade.sh --allow-dirty          # 工作区有未提交改动也继续（默认中止）
+#   ./upgrade.sh --plugins-repo <path>  # 指定插件仓库（默认 ../deepseek-harness-plugins）
+#   ./upgrade.sh --profile <name> --dsh-home <home> --port <port>
+#
+# 每次运行都会把各步的输出落到 /tmp/dsh-upgrade-*.log，失败时给出完整日志路径。
+set -eu
+
+# `$0` 在下面的 `cd` 之后就不再是有效路径了（它是相对调用时写的），所以先把绝对路径存下来：
+# usage() 会在 cd 之后被调用，用 $0 去 sed 只会得到 "No such file or directory"。
+SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+cd "$REPO"
+
+DSH_HOME_DIR="${DSH_HOME:-$HOME/.dsh-official}"
+PROFILE='web'
+PORT='13080'
+PLUGINS_REPO="$REPO/../deepseek-harness-plugins"
+DO_PULL=1
+DO_BUILD=1
+DO_PLUGINS=1
+DO_THIRD_PARTY=1
+DO_RESTART=1
+DRY_RUN=0
+ALLOW_DIRTY=0
+
+usage() {
+  sed -n '2,/^set -eu/p' "$SELF" | grep '^#' | sed 's/^#\{1,\} \{0,1\}//'
+  exit 0
+}
+fail() { echo "✗ $*" >&2; exit 1; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --profile) PROFILE="$2"; shift 2 ;;
+    --dsh-home) DSH_HOME_DIR="$2"; shift 2 ;;
+    --port) PORT="$2"; shift 2 ;;
+    --plugins-repo) PLUGINS_REPO="$2"; shift 2 ;;
+    --no-pull) DO_PULL=0; shift ;;
+    --no-build) DO_BUILD=0; shift ;;
+    --no-plugins) DO_PLUGINS=0; shift ;;
+    --no-third-party) DO_THIRD_PARTY=0; shift ;;
+    --no-restart) DO_RESTART=0; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --allow-dirty) ALLOW_DIRTY=1; shift ;;
+    -h|--help) usage ;;
+    *) fail "未知参数：$1（用 --help 看用法）" ;;
+  esac
+done
+
+command -v node >/dev/null 2>&1 || fail '缺 node'
+command -v pnpm >/dev/null 2>&1 || fail '缺 pnpm'
+command -v git >/dev/null 2>&1 || fail '缺 git'
+
+# 本机 IDE 会给 node 注入 safe-delete 钩子，它在 pnpm 释放锁删文件时抛异常、让整条命令崩掉，
+# 而真正的安装其实已经完成。前置这个变量即可绕开（插件仓库 changes/0017 记过同源问题）。
+export CODEBUDDY_SAFE_DELETE_ENABLED=0
+
+PULL_LOG=/tmp/dsh-upgrade-pull.log
+INSTALL_LOG=/tmp/dsh-upgrade-install.log
+BUILD_LOG=/tmp/dsh-upgrade-build.log
+ALIGN_LOG=/tmp/dsh-upgrade-align.log
+PLUGINS_LOG=/tmp/dsh-upgrade-plugins.log
+RUN_LOG=/tmp/dsh-official-$PROFILE.log
+# 启动等待期的日志快照：实例持有 RUN_LOG 的写端，直接 grep 会等不到 EOF。
+STARTING_LOG=/tmp/dsh-upgrade-starting.log
+
+current_version() { node -p "require('$REPO/package.json').version" 2>/dev/null || echo ''; }
+
+# 一步一个日志文件：失败时给出完整路径，而不是让构建的长输出把失败原因冲走。
+run_step() {
+  label="$1"; log_file="$2"; shift 2
+  echo ""
+  echo "── ${label} ──"
+  if [ "$DRY_RUN" = 1 ]; then
+    echo "[dry-run] $*"
+    echo "[dry-run] 日志将写入 ${log_file}"
+    return 0
+  fi
+  status=0
+  "$@" >"$log_file" 2>&1 || status=$?
+  tail -n 15 "$log_file"
+  [ "$status" -eq 0 ] || fail "${label} 失败（退出码 ${status}），完整日志：${log_file}"
+}
+
+# 只停**监听方**且命令行像 dsh 的进程：两套 dsh 的命令行相同，按名字杀会误伤改造版。
+stop_instance() {
+  echo ""
+  echo '── 停止官方实例 ──'
+  for pid in $(lsof -t -i:"$PORT" -sTCP:LISTEN 2>/dev/null || true); do
+    if ps -p "$pid" -o command= 2>/dev/null | grep -q 'bin\.ts'; then
+      if [ "$DRY_RUN" = 1 ]; then
+        echo "[dry-run] 将停止 PID ${pid}"
+      else
+        kill "$pid" 2>/dev/null || true
+        echo "已停止官方实例（PID ${pid}）"
+      fi
+    else
+      echo "端口 ${PORT} 被非 dsh 进程占用（PID ${pid}），不杀"
+    fi
+  done
+}
+
+start_instance() {
+  echo ""
+  echo '── 启动官方实例 ──'
+  if [ "$DRY_RUN" = 1 ]; then
+    echo "[dry-run] 将启动 home=${DSH_HOME_DIR} profile=${PROFILE} 端口=${PORT}"
+    return 0
+  fi
+  if [ "$PROFILE" = 'web' ] && [ "$PORT" = '13080' ] && [ "$DSH_HOME_DIR" = "$HOME/.dsh-official" ]; then
+    (cd "$REPO/shells" && nohup ./run.sh >>"$RUN_LOG" 2>&1 &)
+  else
+    # 目标被改过，stop.sh / run.sh 会去动另一个 profile，因此走内建启动。
+    (cd "$REPO" && DSH_HOME="$DSH_HOME_DIR" NODE_OPTIONS="--max-old-space-size=12288" \
+      nohup pnpm dsh --profile "$PROFILE" --port "$PORT" >>"$RUN_LOG" 2>&1 &)
+  fi
+  # 等**新实例自己打印出访问地址**，而不是等端口在听：端口可能正被上一次残留的实例占着，
+  # 那时 `lsof` 立刻成功、脚本以为起来了，而新实例其实 `EADDRINUSE` 退出——
+  # 症状是一堆 `waiting for services: webServer`，排查方向完全不对（本次实测就是这个）。
+  waited=0
+  while [ "$waited" -lt 60 ]; do
+    cp "$RUN_LOG" "$STARTING_LOG" 2>/dev/null || : >"$STARTING_LOG"
+    if grep -qE '^dsh web: http' "$STARTING_LOG"; then break; fi
+    waited=$((waited + 1))
+    sleep 1
+  done
+  cp "$RUN_LOG" "$STARTING_LOG" 2>/dev/null || : >"$STARTING_LOG"
+  if ! grep -qE '^dsh web: http' "$STARTING_LOG"; then
+    fail "实例没起来（等了 60 秒），看日志：${RUN_LOG}"
+  fi
+  echo "✓ 已监听 ${PORT}（日志 ${RUN_LOG}）"
+}
+
+check_startup_log() {
+  # 先拍快照再判：**实例一直持有日志的写端**，任何「读到 EOF 才返回」的读法（grep / cat / tail）
+  # 都会一直等下去 —— 日志干净时更是必然，因为没有任何匹配能让 `grep -q` 提前返回，
+  # 于是「升级其实很成功」表现为「升级卡住不退出」。cp 按当前文件大小读，不会等写端关闭。
+  local snapshot="${RUN_LOG}.check"
+  # 访问地址是监听端口之后才打印的：拍早了会拿到半截日志，下面的 URL 判空又会在 `set -e`
+  # 下把整个脚本悄悄终止（实测日志停在这一步、退出码 1，什么都没说）。
+  local waited=0
+  while [ "$waited" -lt 30 ]; do
+    cp "$RUN_LOG" "$snapshot" 2>/dev/null || : >"$snapshot"
+    if grep -qE '^dsh web: http' "$snapshot"; then break; fi
+    waited=$((waited + 1))
+    sleep 1
+  done
+  # 版本门禁的三类输出任一出现都意味着这次升级没真正生效——直接失败，不要留给用户在页面上发现。
+  if grep -qE 'disabling profile plugin row|skipping profile bundle|Plugins waiting for services|startup failed' "$snapshot"; then
+    echo ""
+    echo '✗ 启动日志里仍有版本门禁的禁用项：'
+    grep -E 'disabling profile plugin row|skipping profile bundle|Plugins waiting for services|startup failed' "$snapshot" | head -20
+    fail "完整日志：${RUN_LOG}"
+  fi
+  # 写成 if 而非 `[ -n "$url" ] && echo`：后者在 url 为空时整条列表返回非零，
+  # `set -e` 会把"已经升级成功"变成一次静默失败。
+  url=$(grep -E '^dsh web: http' "$snapshot" | tail -1)
+  if [ -n "$url" ]; then
+    echo "  ${url#dsh web: }"
+  else
+    echo "  ⚠️ 日志里没有访问地址（实例可能没起来），完整日志：${RUN_LOG}"
+  fi
+}
+
+echo "官方 dsh 升级：${REPO}"
+echo "  home=${DSH_HOME_DIR}  profile=${PROFILE}  端口=${PORT}"
+echo "  插件仓库=${PLUGINS_REPO}"
+
+VERSION_BEFORE=$(current_version)
+echo "  当前宿主版本：${VERSION_BEFORE:-（读不到）}"
+
+# ── 1) 拉代码 ────────────────────────────────────────────────────────────────
+if [ "$DO_PULL" = 1 ]; then
+  # 2026-11-13 之前插件仓库会在这里撤销它给宿主源码打的两处补丁（会话事件 ignorable /
+  # 空闲取消落日志），否则 pull 会撞上 dirty 工作区。两处补丁现在都由插件侧原生实现
+  # （官方 plugin record 通道 + agent/created 上的 cancel 包装），宿主保持纯净，本步骤删除。
+  echo ""
+  echo '── 检查工作区 ──'
+  if [ "$(git status --porcelain)" != '' ]; then
+    if [ "$ALLOW_DIRTY" = 1 ]; then
+      echo '工作区有未提交改动，按 --allow-dirty 继续（git pull 若与这些改动冲突会失败）'
+    else
+      git status --porcelain | head -10
+      fail '工作区不干净，`git pull` 会被拒绝或产生冲突。
+  常见来源：本仓库跑测试留下的快照（snapshots/**）、手工改过的源码。
+  处理：提交或丢弃这些改动后重跑；确认无碍时加 --allow-dirty。'
+    fi
+  else
+    echo '✓ 工作区干净'
+  fi
+  run_step '拉取代码（--ff-only）' "$PULL_LOG" git pull --ff-only
+else
+  echo ''
+  echo '── 拉取代码：按 --no-pull 跳过 ──'
+fi
+
+VERSION_AFTER=$(current_version)
+if [ "$VERSION_BEFORE" = "$VERSION_AFTER" ]; then
+  echo "  宿主版本未变：${VERSION_AFTER:-（读不到）}（本次仍会编译与重装，代码可能有新提交）"
+else
+  echo "  宿主版本：${VERSION_BEFORE} → ${VERSION_AFTER}"
+fi
+
+# ── 2) 依赖与编译 ────────────────────────────────────────────────────────────
+if [ "$DO_BUILD" = 1 ]; then
+  run_step '安装依赖' "$INSTALL_LOG" pnpm install
+  run_step '编译（含客户端产物）' "$BUILD_LOG" pnpm run build
+else
+  echo ''
+  echo '── 依赖与编译：按 --no-build 跳过 ──'
+fi
+
+# ── 3) 停实例 ────────────────────────────────────────────────────────────────
+stop_instance
+
+# ── 4) profile 对齐到新宿主版本 ──────────────────────────────────────────────
+ALIGN_ARGS="--dsh-home $DSH_HOME_DIR --profile $PROFILE --dsh $REPO"
+[ "$DO_THIRD_PARTY" = 1 ] && ALIGN_ARGS="$ALIGN_ARGS --allow-third-party"
+[ "$DRY_RUN" = 1 ] && ALIGN_ARGS="$ALIGN_ARGS --dry-run"
+if [ -f "$PLUGINS_REPO/scripts/align-host.mjs" ]; then
+  run_step 'profile 对齐到新宿主版本' "$ALIGN_LOG" \
+    sh -c "cd '$PLUGINS_REPO' && node scripts/align-host.mjs $ALIGN_ARGS"
+else
+  echo ''
+  echo "── profile 对齐：插件仓库里没有 scripts/align-host.mjs（${PLUGINS_REPO}），跳过 ──"
+  echo '   宿主升级后这一步不能省：它会把 profile 里的宿主包钉回新版本，'
+  echo '   否则重启时官方版本门禁会禁用整片挂载行、实例起不来。'
+fi
+
+# ── 4b) 宿主符号形态契约检查 ─────────────────────────────────────────────────
+# 版本对齐只保证"版本号对得上"。宿主还可能把**形状**改了而不发任何告警：预设形参、包导出
+# 形态、设置入口位置（0.2.1-alpha.3 三处都改了，版本号全绿但实例起不来、客户端 bundle 全灭）。
+# 这一步在**构建之前**拦住它们，代价几秒；放到构建后，症状会变成"装进去的功能不生效"。
+CONTRACT_LOG=/tmp/dsh-upgrade-contract.log
+if [ -f "$PLUGINS_REPO/scripts/verify-host-contract.mjs" ]; then
+  run_step '宿主符号形态契约检查' "$CONTRACT_LOG" \
+    sh -c "cd '$PLUGINS_REPO' && node scripts/verify-host-contract.mjs --dsh '$REPO' --profile-dir '$DSH_HOME_DIR/profiles/$PROFILE'"
+else
+  echo ''
+  echo "── 宿主契约检查：插件仓库里没有 scripts/verify-host-contract.mjs（${PLUGINS_REPO}），跳过 ──"
+fi
+
+# ── 5) 插件仓库重装 + 三层验证 ───────────────────────────────────────────────
+if [ "$DO_PLUGINS" = 1 ]; then
+  if [ -f "$PLUGINS_REPO/install-or-update.sh" ]; then
+    PLUGIN_ARGS="--dsh $REPO --dsh-home $DSH_HOME_DIR --profile $PROFILE --port $PORT --no-restart"
+    # 重启由本脚本统一负责（它还要做启动自检），这里只装与验证。
+    run_step '插件仓库重装 + 三层验证' "$PLUGINS_LOG" \
+      sh -c "cd '$PLUGINS_REPO' && DSH_RESTART=no ./install-or-update.sh $PLUGIN_ARGS"
+  else
+    echo ''
+    echo "── 插件仓库重装：没找到 ${PLUGINS_REPO}/install-or-update.sh，跳过 ──"
+  fi
+else
+  echo ''
+  echo '── 插件仓库重装：按 --no-plugins 跳过 ──'
+fi
+
+# ── 6) 启动与自检 ────────────────────────────────────────────────────────────
+if [ "$DO_RESTART" = 1 ]; then
+  # dry-run 不能清空 RUN_LOG：那是上一次启动的日志，清空等于让一次"什么都不做"的运行产生了副作用。
+  if [ "$DRY_RUN" = 1 ]; then
+    echo ''
+    echo "[dry-run] 将清空 ${RUN_LOG} 重新记录，并自检其中没有版本门禁的禁用项"
+  else
+    : >"$RUN_LOG" 2>/dev/null || true
+    start_instance
+    echo ''
+    echo '── 启动自检 ──'
+    check_startup_log
+    echo '✓ 启动日志里没有版本门禁的禁用项'
+  fi
+else
+  echo ''
+  echo '── 启动：按 --no-restart 跳过 ──'
+  echo "  手动启动：cd ${REPO}/shells && ./run.sh"
+fi
+
+echo ''
+echo "✓ 升级完成。宿主版本：${VERSION_AFTER:-（读不到）}"

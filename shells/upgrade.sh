@@ -10,6 +10,9 @@
 #   1) 拉代码（--ff-only，避免把 fork 的提交历史搅乱）
 #   2) 装依赖 + 编译（客户端产物不重新构建的话，实例起来也是空页面）
 #   3) 停实例（带着旧代码跑着的实例会一直持有旧服务）
+#   3b) profile 的 pnpm 版本与本地依赖对齐：profile 的依赖必须由与 node_modules 同一
+#       store 大版本的 pnpm 管理，否则 `dsh plugin add` 会直接以 ERR_PNPM_UNEXPECTED_STORE
+#       失败；`file:` 依赖的 tarball 被清理或搬走时也要在调用 pnpm 前单独报出来。
 #   4) profile 对齐到新宿主版本（插件仓库的 scripts/align-host.mjs）：
 #        · 同步发布年龄豁免名单 —— 新版本刚发布时会被 pnpm 的 supply-chain 策略拒绝，
 #          不同步的话每一步 `dsh plugin add` 都失败；
@@ -197,6 +200,111 @@ check_startup_log() {
   fi
 }
 
+# `dsh plugin add`（profile 对齐与插件安装都经过它）在 profile 目录里调裸 `pnpm`，用哪个版本只看
+# profile package.json 的 packageManager，没写就是机器上的默认 pnpm。pnpm 的 store 按大版本分目录
+# （v10 / v11），换版本后 node_modules 仍指向旧 store，pnpm 会以 ERR_PNPM_UNEXPECTED_STORE 拒绝安装；
+# 而按它的提示 `pnpm install` 重装又会撞上 profile 里指向已删除 tarball 的 file: 依赖。
+# 宿主仓库正是靠 packageManager 把自己钉在固定 pnpm 上，这里把同一个版本写进 profile，让两者的
+# store 一致；宿主换版本时下次升级自动跟随。
+ensure_profile_pnpm() {
+  echo ''
+  echo '── profile pnpm 版本对齐 ──'
+  profile_dir="$DSH_HOME_DIR/profiles/$PROFILE"
+  manifest="$profile_dir/package.json"
+  if [ ! -f "$manifest" ]; then
+    echo '  profile 尚未初始化（没有 package.json），跳过'
+    return 0
+  fi
+  if [ "$DRY_RUN" = 1 ]; then
+    echo "[dry-run] 将核对 ${manifest} 的 packageManager 与 node_modules 的 store 是否一致"
+    return 0
+  fi
+  host_version=$(node -p "require('$REPO/package.json').packageManager.replace(/^pnpm@/, '')" 2>/dev/null || true)
+  host_version="${host_version%%+*}"
+  if [ -z "$host_version" ]; then
+    host_version=$(cd "$REPO" && pnpm --version 2>/dev/null || true)
+  fi
+  host_store=$(cd "$REPO" && pnpm store path 2>/dev/null || true)
+  pinned=$(node -p "String(require('$manifest').packageManager ?? '')" 2>/dev/null || true)
+  existing="${pinned#pnpm@}"
+  profile_store=''
+  modules="$profile_dir/node_modules/.modules.yaml"
+  if [ -f "$modules" ]; then
+    profile_store=$(node -p "JSON.parse(require('node:fs').readFileSync('$modules', 'utf8')).storeDir ?? ''" 2>/dev/null || true)
+  fi
+  if [ -z "$profile_store" ] || [ "$profile_store" = "$host_store" ]; then
+    target="$host_version"
+  else
+    # node_modules 不是宿主这套 pnpm 装的。默认 pnpm 的 store 正好匹配时钉默认版本；
+    # 都不匹配就只能重装依赖，不能替用户冒险（file: 依赖的 tarball 可能已删除）。
+    default_store=$(cd /tmp && pnpm store path 2>/dev/null || true)
+    if [ "$profile_store" = "$default_store" ]; then
+      target=$(cd /tmp && pnpm --version 2>/dev/null || true)
+    else
+      fail "profile 的依赖来自 ${profile_store}，而可用的 pnpm 只会用 ${host_store}（宿主）或 ${default_store:-未知}（默认）。
+  这不只是版本号不同：换 store 必须把 profile 的依赖重装一遍。请先手动处理后再重跑：
+    cd ${profile_dir} && pnpm install"
+    fi
+  fi
+  if [ -z "$target" ]; then
+    fail "读不到宿主的 pnpm 版本（${REPO}/package.json 的 packageManager）"
+  fi
+  if [ "$existing" = "$target" ]; then
+    echo "  packageManager 已是 pnpm@${target}"
+    return 0
+  fi
+  node -e '
+    const fs = require("node:fs")
+    const [path, version] = process.argv.slice(1)
+    const manifest = JSON.parse(fs.readFileSync(path, "utf8"))
+    manifest.packageManager = `pnpm@${version}`
+    fs.writeFileSync(path, `${JSON.stringify(manifest, undefined, 2)}\n`)
+  ' "$manifest" "$target"
+  if [ -n "$existing" ]; then
+    echo "  packageManager：pnpm@${existing} → pnpm@${target}"
+  else
+    echo "  packageManager：未设置 → pnpm@${target}"
+  fi
+  echo "  ✓ 与 node_modules 的 store 一致（${profile_store:-尚未安装依赖}）"
+}
+
+# profile 的 `file:` 依赖指向本地 tarball：插件仓库会定期清掉旧批次（prune-packs），仓库搬家
+# 也会让绝对路径失效。pnpm 每次安装都会先解析整份清单，缺一个文件就崩在它内部（ENOENT），
+# 报错与应用行为无关。这里在调用 pnpm 之前逐个核对，把缺失项和修复动作直接说出来。
+check_profile_file_deps() {
+  echo ''
+  echo '── profile 本地依赖预检 ──'
+  if [ "$DRY_RUN" = 1 ]; then
+    echo '[dry-run] 将核对 file: 依赖的 tarball 是否都还存在'
+    return 0
+  fi
+  profile_dir="$DSH_HOME_DIR/profiles/$PROFILE"
+  manifest="$profile_dir/package.json"
+  if [ ! -f "$manifest" ]; then
+    echo '  profile 尚未初始化，跳过'
+    return 0
+  fi
+  missing=$(node -e '
+    const fs = require("node:fs")
+    const manifest = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+    const missing = []
+    for (const [name, spec] of Object.entries(manifest.dependencies ?? {})) {
+      if (typeof spec !== "string" || !spec.startsWith("file:")) continue
+      const path = spec.slice("file:".length)
+      if (!fs.existsSync(path)) missing.push(`    ${name} → ${path}`)
+    }
+    process.stdout.write(missing.join("\n"))
+  ' "$manifest")
+  if [ -n "$missing" ]; then
+    echo '✗ 以下 file: 依赖指向的 tarball 已不存在：'
+    printf '%s\n' "$missing"
+    fail "任何 pnpm 安装都会因为它们失败。
+  修复：用插件仓库重新打包并安装（如 ${PLUGINS_REPO}/install-or-update.sh），
+  或从 profile 移除这些依赖后重跑。"
+  fi
+  echo '  ✓ file: 依赖的 tarball 都存在'
+}
+
 echo "官方 dsh 升级：${REPO}"
 echo "  home=${DSH_HOME_DIR}  profile=${PROFILE}  端口=${PORT}"
 echo "  插件仓库=${PLUGINS_REPO}"
@@ -247,6 +355,10 @@ fi
 
 # ── 3) 停实例 ────────────────────────────────────────────────────────────────
 stop_instance
+
+# ── 3b) profile 的 pnpm 版本与本地依赖对齐 ───────────────────────────────────
+ensure_profile_pnpm
+check_profile_file_deps
 
 # ── 4) profile 对齐到新宿主版本 ──────────────────────────────────────────────
 ALIGN_ARGS="--dsh-home $DSH_HOME_DIR --profile $PROFILE --dsh $REPO"
